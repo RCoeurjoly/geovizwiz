@@ -5,6 +5,8 @@ site/geoconverter
 geoconverter/browser/
 geoconverter/lib/
 local-deploy/*
+.cache/
+local-data/
 
 util/util.zip
 
