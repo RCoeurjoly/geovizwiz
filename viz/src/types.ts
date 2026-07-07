@@ -189,6 +189,8 @@ export type DataStore = {
   name: string;
   file: File;
   asyncBuffer: AsyncBuffer;
+  sourceFormat: 'geoparquet' | 'geojson';
+  rawGeoJSON: GeoJSON.FeatureCollection | null;
   geojson: GeoJSON.FeatureCollection | null;
   numericFieldsFromSchema: string[];
   categoricalFieldsFromSchema: string[];

@@ -13,6 +13,7 @@ import type { AsyncBuffer } from './utils.sanitize';
 import { cloneFilters, setFiltersContext, isFilterComplete } from './filters';
 import { refreshLandSchedulePanel } from './land-schedule';
 import { FILTER_ICON, CHART_ICON, SCATTER_ICON, STREET_ICON, SATELLITE_ICON } from './icons';
+import { isGeoJsonFileName } from './data-ingest';
 
 /* ------------------------------------------------------------------ */
 /*  DOM element references — imported directly from dom-refs.          */
@@ -201,11 +202,14 @@ export function renderLayerSelectOptions(
 export function createDataStore(file: File, asyncBuffer: AsyncBuffer): DataStore {
   const id = `store-${Date.now()}-${Math.random().toString(16).slice(2)}`;
   const name = file.name.replace(/\.[^/.]+$/, '') || file.name;
+  const sourceFormat = isGeoJsonFileName(file.name) ? 'geojson' : 'geoparquet';
   return {
     id,
     name,
     file,
     asyncBuffer,
+    sourceFormat,
+    rawGeoJSON: null,
     geojson: null,
     numericFieldsFromSchema: [],
     categoricalFieldsFromSchema: [],

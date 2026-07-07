@@ -244,6 +244,7 @@ import {
   updateToolbarButtonStates, updateCursor,
   activateTool,
 } from './toolbar';
+import { inferGeoJSONFields, isGeoJsonFileName, parseGeoJSONFeatureCollection } from './data-ingest';
 import {
   addOrUpdateSource,
   initRenderingCallbacks,
@@ -1077,15 +1078,15 @@ function installWelcome() {
   const card = document.createElement('div');
   card.style.cssText = 'background:#fff;border-radius:12px;box-shadow:0 6px 24px rgba(0,0,0,.12);padding:18px 20px;max-width:560px;width:min(92vw,560px);display:grid;gap:12px;text-align:center;';
   card.innerHTML = `
-    <div style="font-size:16px;font-weight:600;">Load a GeoParquet file</div>
-    <div style="color:#666;font-size:13px;">Choose a <code>.parquet</code> to visualize.</div>
+    <div style="font-size:16px;font-weight:600;">Load a parcel file</div>
+    <div style="color:#666;font-size:13px;">Choose a <code>.parquet</code> or <code>.geojson</code> to visualize.</div>
     <div style="color:#666;font-size:13px;">TIP: make sure it has polygon geometry; lines/points won't work.</div>
   `;
   const row = document.createElement('div');
   row.style.cssText='display:flex;gap:10px;justify-content:center;flex-wrap:wrap';
 
   const btnBrowse = document.createElement('button');
-  btnBrowse.textContent='Browse GeoParquet…';
+  btnBrowse.textContent='Browse data file…';
   btnBrowse.style.cssText='border:1px solid #ddd;background:#f8f8f8;padding:8px 12px;border-radius:10px;cursor:pointer;';
   btnBrowse.onclick = () => fileInput.click();
 
@@ -1159,7 +1160,7 @@ function awaitFirstRenderedFeature(layerId: string) {
 /* (Heuristics, field choosers, size modal, and add-layer modal moved to modals.ts) */
 
 /* ---------------- Loading overlay helpers ---------------- */
-function showLoading(msg = 'Parsing GeoParquet…', determinate = false) {
+function showLoading(msg = 'Parsing data…', determinate = false) {
   S.cancelRequested = false;
   progressMsg.textContent = msg;
   progressEl.classList.toggle('indeterminate', !determinate);
@@ -1373,20 +1374,34 @@ window.addEventListener('data-sources-changed', () => {
   renderSettingsDataSourcesSection();
 });
 
+async function featureCollectionFromCurrentSource(): Promise<GeoJSON.FeatureCollection> {
+  const store = S.currentDataStoreId ? S.dataStores.get(S.currentDataStoreId) ?? null : null;
+  if (store?.sourceFormat === 'geojson') {
+    if (store.rawGeoJSON) return store.rawGeoJSON;
+    if (!S.lastFile) throw new Error('No GeoJSON file is selected.');
+    const fc = parseGeoJSONFeatureCollection(await S.lastFile.text());
+    store.rawGeoJSON = fc;
+    return fc;
+  }
+
+  if (!S.lastAsyncBuffer) throw new Error('No GeoParquet file is selected.');
+  const result: any = await toGeoJson({ file: S.lastAsyncBuffer, compressors });
+  const fc: GeoJSON.FeatureCollection | undefined =
+    result?.type === 'FeatureCollection' ? result : result?.geojson;
+  if (!fc?.features) throw new Error('Parser returned no FeatureCollection.');
+  return fc;
+}
+
 /* ---------------- Load selected columns (+ geometry) ---------------- */
 async function loadSelectedColumns() {
-  if (!S.lastAsyncBuffer || !S.lastFile) return;
+  if (!S.lastFile) return;
   showLoading('Reading geometry + selected fields…');
   const hadDataBeforeLoad = Boolean(S.currentGeoJSON?.features?.length);
   let shouldAutoZoomAfterLoad = false;
 
   try {
-    const result: any = await toGeoJson({ file: S.lastAsyncBuffer, compressors });
+    const fc = await featureCollectionFromCurrentSource();
     if (S.cancelRequested) return;
-
-    const fc: GeoJSON.FeatureCollection | undefined =
-      result?.type === 'FeatureCollection' ? result : result?.geojson;
-    if (!fc?.features) throw new Error('Parser returned no FeatureCollection.');
 
     let features = fc.features.filter(f => f.geometry && (f.geometry.type === 'Polygon' || f.geometry.type === 'MultiPolygon'));
     if (features.length === 0) throw new Error('No Polygon/MultiPolygon features found.');
@@ -1469,8 +1484,8 @@ async function loadSelectedColumns() {
     shouldAutoZoomAfterLoad = !hadDataBeforeLoad && S.currentGeoJSON.features.length > 0;
     persistCurrentLayerState();
   } catch (err: any) {
-    console.error('GeoParquet load failed:', err);
-    if (!S.cancelRequested) alert(`GeoParquet load failed: ${err?.message ?? err}`);
+    console.error('Data load failed:', err);
+    if (!S.cancelRequested) alert(`Data load failed: ${err?.message ?? err}`);
   } finally {
     hideLoading();
     if (shouldAutoZoomAfterLoad && S.currentGeoJSON) {
@@ -2559,11 +2574,54 @@ if (addLayerOverlay) {
   });
 }
 
-// File load: read METADATA ONLY
-fileInput.addEventListener('change', async () => {
-  const file = fileInput.files?.[0];
-  if (!file) return;
+type DataLoadOptions = {
+  skipWizard?: boolean;
+  preferredField?: string;
+};
 
+function applyPreferredVisualizationField(preferredField?: string) {
+  if (!S.currentGeoJSON) return;
+  const candidates = [
+    preferredField,
+    'REALLANDVA',
+    'land_value_per_sqm',
+    'tax_basis_nok',
+    'property_tax_nok',
+  ].filter(Boolean) as string[];
+  const field = candidates.find((name) => fieldSelect.querySelector(`option[value="${CSS.escape(name)}"]`));
+  if (!field) return;
+  fieldSelect.value = field;
+  fieldSelect.dispatchEvent(new Event('change'));
+}
+
+function autoLoadUrlFromQuery(): string | null {
+  const params = new URLSearchParams(window.location.search);
+  if (params.get('oslo') === '1' || params.get('city')?.toLowerCase() === 'oslo') {
+    return '/local-data/oslo-no-parcels.geojson';
+  }
+  return params.get('data') || params.get('dataset');
+}
+
+async function maybeAutoLoadDataFromQuery() {
+  const dataUrl = autoLoadUrlFromQuery();
+  if (!dataUrl) return;
+  try {
+    showLoading('Loading local data…');
+    const response = await fetch(dataUrl);
+    if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+    const blob = await response.blob();
+    const filename = decodeURIComponent(dataUrl.split('/').pop()?.split('?')[0] || 'local-data.geojson');
+    const file = new File([blob], filename, { type: blob.type || 'application/geo+json' });
+    await loadDataFile(file, { skipWizard: true, preferredField: 'REALLANDVA' });
+  } catch (err: any) {
+    console.error('Autoload failed:', err);
+    alert(`Could not autoload data: ${err?.message ?? err}`);
+  } finally {
+    hideLoading();
+  }
+}
+
+async function loadDataFile(file: File, options: DataLoadOptions = {}) {
   persistCurrentLayerState();
   const dataStore = createDataStore(file, fileToAsyncBuffer(file));
   S.dataStores.set(dataStore.id, dataStore);
@@ -2578,48 +2636,76 @@ fileInput.addEventListener('change', async () => {
     S.lastFile = dataStore.file;
     S.lastAsyncBuffer = dataStore.asyncBuffer;
 
-    const md = await parquetMetadataAsync(S.lastAsyncBuffer);
-    const numRows = Number(md.num_rows ?? 0);
-
-    const kv = (md as any).key_value_metadata || (md as any).keyValueMetadata || [];
-    const geoKV = kv.find((e: any) => String(e.key).toLowerCase() === 'geo');
+    let numRows = 0;
     let primaryGeom = 'geometry';
-    try {
-      if (geoKV?.value) {
-        const parsed = JSON.parse(geoKV.value);
-        if (parsed?.primary_column) primaryGeom = parsed.primary_column;
-      }
-    } catch {}
-    
-    // numeric and categorical top-level columns (not geometry)
-    const schemaTree: any = parquetSchema(md);
-    const top = Array.isArray(schemaTree?.children) ? schemaTree.children : [];
-    const numeric: string[] = [];
-    const categorical: string[] = [];
+    let numeric: string[] = [];
+    let categorical: string[] = [];
 
-    for (const node of top) {
-      const name = node?.element?.name ?? node?.name;
-      if (!name || name === primaryGeom) continue;
-      
-      const el = node.element ?? {};
-      const typeStr = String(el.type?.type ?? el.type ?? el.physicalType ?? el.primitiveType ?? '');
-      const logical = String(el.logicalType?.type ?? el.logicalType ?? el.convertedType ?? '');
-      
-      const isNumeric =
-        ['DOUBLE','FLOAT','INT32','INT64','INT16','INT8'].includes(typeStr.toUpperCase()) ||
-        logical.toUpperCase() === 'DECIMAL';
-      
-      // Everything that's not numeric is categorical (including strings, booleans, etc.)
-      const isCategorical = !isNumeric;
-      
-      if (isNumeric) numeric.push(name);
-      else if (isCategorical) categorical.push(name);
+    if (isGeoJsonFileName(file.name)) {
+      const fc = parseGeoJSONFeatureCollection(await file.text());
+      dataStore.rawGeoJSON = fc;
+      numRows = fc.features.length;
+      const inferred = inferGeoJSONFields(fc);
+      numeric = inferred.numeric;
+      categorical = inferred.categorical;
+    } else {
+      const md = await parquetMetadataAsync(S.lastAsyncBuffer);
+      numRows = Number(md.num_rows ?? 0);
+
+      const kv = (md as any).key_value_metadata || (md as any).keyValueMetadata || [];
+      const geoKV = kv.find((e: any) => String(e.key).toLowerCase() === 'geo');
+      try {
+        if (geoKV?.value) {
+          const parsed = JSON.parse(geoKV.value);
+          if (parsed?.primary_column) primaryGeom = parsed.primary_column;
+        }
+      } catch {}
+
+      // numeric and categorical top-level columns (not geometry)
+      const schemaTree: any = parquetSchema(md);
+      const top = Array.isArray(schemaTree?.children) ? schemaTree.children : [];
+
+      for (const node of top) {
+        const name = node?.element?.name ?? node?.name;
+        if (!name || name === primaryGeom) continue;
+
+        const el = node.element ?? {};
+        const typeStr = String(el.type?.type ?? el.type ?? el.physicalType ?? el.primitiveType ?? '');
+        const logical = String(el.logicalType?.type ?? el.logicalType ?? el.convertedType ?? '');
+
+        const isNumeric =
+          ['DOUBLE','FLOAT','INT32','INT64','INT16','INT8'].includes(typeStr.toUpperCase()) ||
+          logical.toUpperCase() === 'DECIMAL';
+
+        // Everything that's not numeric is categorical (including strings, booleans, etc.)
+        const isCategorical = !isNumeric;
+
+        if (isNumeric) numeric.push(name);
+        else if (isCategorical) categorical.push(name);
+      }
     }
 
     S.lastNumericFieldsFromSchema = numeric.sort();
     S.lastCategoricalFieldsFromSchema = categorical.sort();
     dataStore.numericFieldsFromSchema = [...S.lastNumericFieldsFromSchema];
     dataStore.categoricalFieldsFromSchema = [...S.lastCategoricalFieldsFromSchema];
+
+    if (options.skipWizard) {
+      dataStore.chosenNumericFields = [...dataStore.numericFieldsFromSchema];
+      dataStore.chosenCategoricalFields = dataStore.categoricalFieldsFromSchema.filter((field) =>
+        ['parcel_id', 'address', 'adresse', 'kommunenummer', 'kommunenavn', 'matrikkelnummerTekst'].includes(field)
+      );
+      const landField = dataStore.numericFieldsFromSchema.includes('land_area_sqm') ? 'land_area_sqm' : null;
+      dataStore.landSizeField = landField;
+      dataStore.landSizeUnitLabel = landField ? 'sqm' : null;
+      S.chosenNumericFields = [...dataStore.chosenNumericFields];
+      S.chosenCategoricalFields = [...dataStore.chosenCategoricalFields];
+      S.landSizeField = dataStore.landSizeField;
+      S.landSizeUnitLabel = dataStore.landSizeUnitLabel;
+      await loadSelectedColumns();
+      applyPreferredVisualizationField(options.preferredField);
+      return;
+    }
 
     // Check if this parquet matches a placeholder from a loaded project
     const matchingPlaceholder = Array.from(S.dataStores.values()).find(
@@ -2688,8 +2774,15 @@ fileInput.addEventListener('change', async () => {
     }
   } catch (err: any) {
     console.error('Metadata read failed:', err);
-    alert(`Could not read Parquet metadata: ${err?.message ?? err}`);
+    alert(`Could not read file metadata: ${err?.message ?? err}`);
   }
+}
+
+// File load: read METADATA ONLY
+fileInput.addEventListener('change', async () => {
+  const file = fileInput.files?.[0];
+  if (!file) return;
+  await loadDataFile(file);
 });
 
 // Scaling mode (continuous/quantiles). Only recompute after data is loaded.
@@ -3367,6 +3460,7 @@ if (document.readyState === 'loading') {
 }
 
 installWelcome();
+void maybeAutoLoadDataFromQuery();
 
 // Initialize selection module with callbacks into main.ts
 initSelection({

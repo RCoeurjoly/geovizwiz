@@ -1173,7 +1173,7 @@
   <div id="addLayerOverlay" class="overlay">
     <div class="modal">
       <h3>Add a layer</h3>
-      <div class="muted">Choose an existing data source or browse for a GeoParquet file.</div>
+      <div class="muted">Choose an existing data source or browse for a GeoParquet or GeoJSON file.</div>
 
       <div class="section-title">Existing data sources</div>
       <div id="dataStoreList" class="layer-list"></div>
@@ -1188,7 +1188,7 @@
         <button id="btnCancelAddLayer" type="button">Cancel</button>
       </div>
 
-      <input id="file" type="file" accept=".parquet,.parq" style="display:none" />
+      <input id="file" type="file" accept=".parquet,.parq,.geoparquet,.geojson,.geo.json,.json" style="display:none" />
       <input id="projectFile" type="file" accept=".geovizwiz.json,.json" style="display:none" />
     </div>
   </div>
@@ -1271,4 +1271,3 @@
   <script type="module" src="./src/main.ts"></script>
 </body>
 </html>
-
